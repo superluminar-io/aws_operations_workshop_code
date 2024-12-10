@@ -1,121 +1,164 @@
+import * as aws from "@pulumi/aws";
 import * as awsx from "@pulumi/awsx";
-import * as ecs from "@pulumi/awsx/ecs";
-import * as classic from "@pulumi/awsx/classic";
-import * as apigateway from "@pulumi/aws/apigateway";
-import * as lambda from "@pulumi/aws/lambda";
 import * as pulumi from "@pulumi/pulumi";
-import * as iam from "@pulumi/aws/iam";
-
+import * as classic from "@pulumi/awsx/classic";
 
 const vpc = classic.ec2.Vpc.getDefault();
 
-const cluster = new classic.ecs.Cluster("cluster");
+// 1. Create an ECS Cluster
+const ecsCluster = new aws.ecs.Cluster("ecs-cluster");
 
-// Create a load balancer on port 80 and spin up two instances of Nginx.
-const lb = new classic.lb.ApplicationListener("nginx-lb", {port: 8080});
-const targetGroup = lb.defaultTargetGroup!.targetGroup;
+// 2. Define the Nginx Task Definition
+const nginxTaskRole = new aws.iam.Role("nginx-task-role", {
+  assumeRolePolicy: aws.iam.assumeRolePolicyForPrincipal({ Service: "ecs-tasks.amazonaws.com" }),
+});
 
-// docker cp tmp-nginx-container:/etc/nginx/nginx.conf /host/path/nginx.conf
-const fargateTask = new ecs.FargateTaskDefinition("fargate-task", {
-  container: {
-    image: "nginx:alpine",
+const nginxTaskDefinition = new aws.ecs.TaskDefinition("nginx-task", {
+  family: "nginx-task",
+  cpu: "256",
+  memory: "512",
+  networkMode: "awsvpc",
+  requiresCompatibilities: ["FARGATE"],
+  executionRoleArn: nginxTaskRole.arn,
+  containerDefinitions: JSON.stringify([{
     name: "nginx",
-    cpu: 512,
-    memory: 128,
+    image: "nginx:latest",
     essential: true,
-    portMappings: [{targetGroup}],
-    // command: ["COPY", "/etc/nginx/nginx.conf", "nginx.conf"],
-  },
+    portMappings: [{ containerPort: 80, hostPort: 80 }],
+  }]),
 });
 
-const service = new ecs.FargateService("my-service", {
-  cluster: cluster.cluster.arn,
-  taskDefinition: fargateTask.taskDefinition.arn,
-  loadBalancers: fargateTask.loadBalancers,
+// 3. Create a Service for the Nginx Task
+const nginxService = new aws.ecs.Service("nginx-service", {
+  cluster: ecsCluster.arn,
+  desiredCount: 1,
+  launchType: "FARGATE",
+  taskDefinition: nginxTaskDefinition.arn,
   networkConfiguration: {
-    subnets: vpc.publicSubnetIds,
     assignPublicIp: true,
+    subnets: vpc.publicSubnetIds,
+   // TODO: securityGroups: [],
   },
 });
 
-// Export the load balancer's address so that it's easy to access.
-export const url = lb.endpoint.hostname;
+// 4. Create a DynamoDB Table
+const dynamoTable = new aws.dynamodb.Table("itemsTable", {
+  attributes: [{ name: "id", type: "S" }],
+  hashKey: "id",
+  billingMode: "PAY_PER_REQUEST",
+});
 
+// 5. Create IAM Roles for the Lambda Functions
+const lambdaRole = new aws.iam.Role("lambdaRole", {
+  assumeRolePolicy: aws.iam.assumeRolePolicyForPrincipal({ Service: "lambda.amazonaws.com" }),
+});
 
-// API Gateway & Lambda
-//Lambda function
-// const lambdaRole = new iam.Role("lambdaRole", {
-//   assumeRolePolicy: iam.assumeRolePolicyForPrincipal({Service: "lambda.amazonaws.com"}),
-// });
-//
-// const lambdaPolicy = new iam.RolePolicy("lambdaPolicy", {
-//   role: lambdaRole.id,
-//   policy: pulumi.output({
-//     Version: "2012-10-17",
-//     Statement: [{
-//       Action: "lambda:InvokeFunction",
-//       Effect: "Allow",
-//       Resource: "*",
-//     }],
-//   }),
-// });
-//
-// const lambdaFunction = new lambda.Function("myFunction", {
-//   runtime: lambda.Runtime.NodeJS20dX,
-//   role: lambdaRole.arn,
-//   handler: "index.handler",
-//   code: new pulumi.asset.AssetArchive({
-//     ".": new pulumi.asset.FileArchive("./lambda"),
-//   }),
-// });
-//
-// // RestAPI
-// const api = new apigateway.RestApi("myApi", {
-//   description: "API Gateway example",
-// });
-//
-// const resource = new apigateway.Resource("myResource", {
-//   restApi: api.id,
-//   parentId: api.rootResourceId,
-//   pathPart: "myresource",
-// });
-//
-// const method = new apigateway.Method("myMethod", {
-//   restApi: api.id,
-//   resourceId: resource.id,
+new aws.iam.RolePolicyAttachment("lambdaRolePolicy", {
+  role: lambdaRole.name,
+  policyArn: aws.iam.ManagedPolicies.AWSLambdaBasicExecutionRole,
+});
+
+new aws.iam.RolePolicy("dynamodbAccessPolicy", {
+  role: lambdaRole.name,
+  policy: pulumi.output(dynamoTable.arn).apply(arn => JSON.stringify({
+    Version: "2012-10-17",
+    Statement: [
+      {
+        Effect: "Allow",
+        Action: ["dynamodb:GetItem", "dynamodb:PutItem"],
+        Resource: arn,
+      },
+    ],
+  })),
+});
+
+// 6. Define Lambda Functions for Get and Put
+const getLambda = new aws.lambda.Function("getLambda", {
+  runtime: "nodejs18.x",
+  handler: "index.handler",
+  role: lambdaRole.arn,
+  code: new pulumi.asset.AssetArchive({
+    ".": new pulumi.asset.FileArchive("./src/getLambda"),
+  }),
+  environment: {
+    variables: { TABLE_NAME: dynamoTable.name },
+  },
+});
+
+const putLambda = new aws.lambda.Function("putLambda", {
+  runtime: "nodejs18.x",
+  handler: "index.handler",
+  role: lambdaRole.arn,
+  code: new pulumi.asset.AssetArchive({
+    ".": new pulumi.asset.FileArchive("./src/putLambda"),
+  }),
+  environment: {
+    variables: { TABLE_NAME: dynamoTable.name },
+  },
+});
+
+// 7. Create the REST API
+const restApi = new aws.apigateway.RestApi("restApi", {
+  name: "MyRestApi",
+});
+
+// Define resources (paths)
+const rootResource = new aws.apigateway.Resource("rootResource", {
+  restApi: restApi.id,
+  parentId: restApi.rootResourceId,
+  pathPart: "resource",
+});
+
+// Create Lambda integration for GET
+// const getIntegration = new aws.apigateway.Integration("getIntegration", {
+//   restApi: restApi.id,
+//   resourceId: rootResource.id,
 //   httpMethod: "GET",
-//   authorization: "NONE",
-// });
-//
-// const integration = new apigateway.Integration("myIntegration", {
-//   restApi: api.id,
-//   resourceId: resource.id,
-//   httpMethod: method.httpMethod,
-//   integrationHttpMethod: "POST",
 //   type: "AWS_PROXY",
-//   uri: lambdaFunction.invokeArn,
+//   integrationHttpMethod: "POST",
+//   uri: getLambda.arn,
 // });
+
+// Create Lambda integration for PUT
+// const putIntegration = new aws.apigateway.Integration("putIntegration", {
+//   restApi: restApi.id,
+//   resourceId: rootResource.id,
+//   httpMethod: "PUT",
+//   type: "AWS_PROXY",
+//   integrationHttpMethod: "POST",
+//   uri: putLambda.arn,
+// });
+
+// Define GET method
+const getMethod = new aws.apigateway.Method("getMethod", {
+  restApi: restApi.id,
+  resourceId: rootResource.id,
+  httpMethod: "GET",
+  authorization: "NONE",
+});
+
+// Define PUT method
+const putMethod = new aws.apigateway.Method("putMethod", {
+  restApi: restApi.id,
+  resourceId: rootResource.id,
+  httpMethod: "PUT",
+  authorization: "NONE",
+});
+
+// Deploy the REST API
+// const deployment = new aws.apigateway.Deployment("restApiDeployment", {
+//   restApi: restApi.id,
 //
-// const deployment = new apigateway.Deployment("myDeployment", {
-//   restApi: api.id,
-// }, {dependsOn: [method]});
+// },
+//   {
+//     dependsOn: [restApi, getMethod, putMethod],
+//   });
 //
-// const stage = new apigateway.Stage("myStage", {
-//   restApi: api.id,
-//   deployment: deployment.id,
+// const stage = new aws.apigateway.Stage("stage", {
+//   restApi: restApi.id,
 //   stageName: "test",
+//   deployment: deployment.id,
 // });
-//
-//
-// new lambda.Permission("apiGatewayPermission", {
-//   action: "lambda:InvokeFunction",
-//   function: lambdaFunction.name,
-//   principal: "apigateway.amazonaws.com",
-//   sourceArn: pulumi.interpolate`${api.executionArn}/*/*`,
-// });
-//
-//
-// // Export the URL of the deployed API
-// export const apiUrl = pulumi.interpolate`${deployment.invokeUrl}/myresource`;
-//
-// Alternative: Lambda as Targetgroup Attachement
+
+// Export the endpoint URL
+// export const apiEndpoint = deployment.invokeUrl;
