@@ -1,6 +1,6 @@
 {
     "name": "aws-operations-workshop",
-    "main": "index.ts",
+    "main": "index.ts_old_try",
     "devDependencies": {
         "@types/node": "^18",
         "typescript": "^5.0.0"
