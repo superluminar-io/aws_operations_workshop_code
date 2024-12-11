@@ -1,5 +1,6 @@
 import * as pulumi from "@pulumi/pulumi";
 import * as aws from "@pulumi/aws";
+import * as apigateway from "@pulumi/aws-apigateway";
 
 
 // Create ECR Repository
@@ -80,6 +81,28 @@ new aws.lambda.EventSourceMapping("queue-trigger", {
   functionName: processor.name,
   batchSize: 1,
 });
+
+// API Gateway setup
+const lambda = new aws.lambda.Function("get-lambda", {
+  runtime: aws.lambda.Runtime.NodeJS18dX,
+  role: lambdaRole.arn,
+  handler: "index.handler",
+  code: new pulumi.asset.AssetArchive({
+    ".": new pulumi.asset.FileArchive("./dist"),
+  }),
+  timeout: 3,
+});
+
+const api = new apigateway.RestAPI("api", {
+  routes: [
+    {
+      path: "/",
+      method: "GET",
+      eventHandler: lambda,
+    },
+  ],
+});
+
 
 const taskRole = new aws.iam.Role("ecs-task-role", {
   assumeRolePolicy: JSON.stringify({
@@ -237,6 +260,12 @@ const taskDefinition = new aws.ecs.TaskDefinition("workshop-task", {
           protocol: "tcp",
         },
       ],
+      environment: [
+        {
+          name: "API_GATEWAY_URL",
+          value: api.url,
+        },
+      ],
       logConfiguration: {
         logDriver: "awslogs",
         options: {
@@ -253,13 +282,7 @@ const taskDefinition = new aws.ecs.TaskDefinition("workshop-task", {
 const taskSg = new aws.ec2.SecurityGroup("task-sg", {
   vpcId: vpc.id,
 });
-new aws.vpc.SecurityGroupIngressRule("task-sg-allow-http-ipv4", {
-  securityGroupId: taskSg.id,
-  cidrIpv4: "0.0.0.0/0",
-  ipProtocol: "tcp",
-  fromPort: 80,
-  toPort: 80,
-});
+
 new aws.vpc.SecurityGroupEgressRule("task-sg-allow-all-traffic-ipv4", {
   securityGroupId: taskSg.id,
   cidrIpv4: "0.0.0.0/0",
@@ -380,3 +403,6 @@ export const albDnsName = alb.dnsName;
 
 // Export the repository URL
 export const repositoryUrl = repository.repositoryUrl;
+
+// The URL at which the REST API will be served.
+export const url = api.url;

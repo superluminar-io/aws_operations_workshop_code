@@ -1,12 +1,18 @@
 {
     "name": "aws-operations-workshop",
-    "main": "index.ts_old_try",
+    "main": "index.ts",
+    "scripts": {
+        "build-get-lambda": "esbuild src/getLambda/index.ts --bundle --platform=node --target=node18 --outfile=dist/index.js",
+        "zip": "zip -r lambda.zip dist/"
+    },
     "devDependencies": {
         "@types/node": "^18",
-        "typescript": "^5.0.0"
+        "esbuild": "^0.24.0",
+        "typescript": "^5.7.2"
     },
     "dependencies": {
         "@pulumi/aws": "^6.0.0",
+        "@pulumi/aws-apigateway": "^2.6.1",
         "@pulumi/awsx": "^2.0.2",
         "@pulumi/pulumi": "^3.113.0"
     }

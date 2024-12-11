@@ -1,7 +1,7 @@
 declare global {
   namespace NodeJS {
     interface ProcessEnv {
-      APIGATEWAY_URL: string;
+      API_GATEWAY_URL: string;
     }
   }
 }

@@ -1,7 +1,7 @@
 {
     "compilerOptions": {
         "strict": true,
-        "outDir": "bin",
+        "outDir": "./dist",
         "target": "es2020",
         "module": "commonjs",
         "moduleResolution": "node",
@@ -12,6 +12,7 @@
         "noImplicitReturns": true,
         "forceConsistentCasingInFileNames": true
     },
+    "include": ["src/**/*"],
     "files": [
       "index.ts"
     ]
